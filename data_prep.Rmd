@@ -197,9 +197,18 @@ init_list <- init_list %>%
           CAN_INIT_STAT  == 2030 ~ "Status 2",
           CAN_INIT_STAT  == 2999 ~ "Inactive"
         ),
-        status = factor(status)
+        status = factor(status),
+        dead = case_when(
+          CAN_REM_CD != 4 & to_die ==1 ~ 1,
+          TRUE ~ 0
+        ),
+        time = case_when(
+          dead ==1 ~ dead_date - list_date,
+          TRUE ~ rem_dt - list_date
+        )
   ) %>%
   select(PX_ID, status, #patient ID and listing status
+         dead, time,
          age, female, race, #basic demographics
          bmi, blood_type, simple_diagnosis, eGFR, diabetes, functional_status, #diagnosis and medical comorbidities, some factor variables some continuous
          cardiac_index, pcwp, #hemodynamics
