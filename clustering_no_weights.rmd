@@ -25,14 +25,12 @@ opts_chunk$set(cache = TRUE, warning=FALSE, message=FALSE, tidy.opts=list(width.
 ```{r packages, warning=FALSE, message=FALSE}
 library(tidyverse)
 library(cluster)
-library(Rtsne)
 library(seriation)
+library(ggfortify)
 ```
 
 
 # Variable Selection
-
-
 
 ## Load data in 
 ```{r main_dataset}
@@ -45,34 +43,78 @@ to_cluster %>% select(-PX_ID) %>% skimr::skim()
 ## Feature selection and random sub-sample
 
 We select only complete cases for now. We will always ignore the `PX_ID` variable when computing the distance matrix, it's just a meaningless patient ID variable. We will also ignore `status` during this first iteration, see if we can re-create the status groups with the clusters. We restrict the variables to clinical data (age, sex, bmi, diagnosis, comorbidities, functional status, hemodynamics, and treatments), removing socioeconomic variables like race and insurance status.
+
+
+```{r}
+library(survival)
+
+big_model <- coxph(Surv(time, dead) ~ age + bmi + ecmo + female + high_dose_inotropes + iabp+ low_dose_inotropes + lvad + other_mcs + cardiac_index + eGFR + pcwp + blood_type + diabetes + functional_status + simple_diagnosis + payor + race, 
+                   data = to_cluster %>% na.omit())
+
+summary(big_model)
+```
+
+
+```{r get_weights}
+sig_vars <- summary(big_model)$coef[,5] <= 0.05
+
+sig_vars <- sig_vars[sig_vars == TRUE]
+
+weights <- abs(big_model$coefficients)
+
+weights <- weights[names(sig_vars)]
+
+weights
+```
+
+
+
+
 ```{r load_data_in_subsample}
+
 
 set.seed(1235)
 
 df <- to_cluster %>%
   filter(status != "Inactive") %>%
-  select(status,
-         age,
-    simple_diagnosis, 
-         eGFR, diabetes, functional_status, 
-         cardiac_index,pcwp) %>%
-  mutate_at(c("age", "eGFR", "cardiac_index", "pcwp"), scale) %>%
-  mutate_at(c("age", "eGFR", "cardiac_index", "pcwp"), as.numeric) %>%
+  filter(bmi > 10 & bmi < 50) %>%
   na.omit() %>%
-  sample_n(1000) 
+  sample_n(10000)
 
+ids <- df %>% select(PX_ID, status) 
 
-names(df)
+df <- df %>%
+  select(-status, -PX_ID, -dead, -time) %>%
+  select(age, bmi, ecmo, high_dose_inotropes, iabp, low_dose_inotropes, lvad,
+         other_mcs, eGFR, pcwp,
+         blood_type, diabetes, functional_status, simple_diagnosis,
+         payor, race) %>%
+  mutate(treatment = case_when(
+    ecmo == 1 ~ "ECMO",
+    iabp == 1 ~ "IABP",
+    high_dose_inotropes == 1 ~ "High-dose inotropes",
+    other_mcs == 1 ~ "Other MCS",
+    lvad == 1 ~ "LVAD",
+    TRUE ~ "None"
+  ),
+  treatment = factor(treatment))%>%
+  select(-ecmo, -high_dose_inotropes, -iabp, -low_dose_inotropes, -lvad, -other_mcs) 
 
 df
 ```
 
+
+```{r}
+names(df)
+```
+
+
+
 # Compute Gower's Distance Matrix
-
-
 ```{r compute_gower}
 
-gower_dist <- daisy(df %>% select(-status), metric = "gower")
+gower_dist <- daisy(df, metric = "gower")
+
 
 gower_mat <- as.matrix(gower_dist)
 
@@ -97,9 +139,9 @@ df[which(gower_mat == max(gower_mat[gower_mat != max(gower_mat)]), arr.ind = TRU
 
 Using Gower's distance matrix
 ```{r ODI}
-pdf("Figure_1_ODI.pdf")
-dissplot(gower_dist_object)
-dev.off()
+# pdf("Figure_1_ODI.pdf")
+# dissplot(gower_dist_object)
+# dev.off()
 ```
 
 From the ODI plot, there seem to be at least 3 clusters
@@ -107,22 +149,25 @@ From the ODI plot, there seem to be at least 3 clusters
 
 # K finding for PAM clustering
 
-We chose PAM because...
 
 ## Silhoutette Width
 ```{r sil_width}
-pdf("Figure_2_average_silhouette_by_cluster_number.pdf")
-sil_width <- c(NA)
-for(i in 2:15){  
-  pam_fit <- pam(gower_dist, diss = TRUE, k = i)  
-  sil_width[i] <- pam_fit$silinfo$avg.width  
-}
-plot(1:15, sil_width,
-     xlab = "Number of clusters",
-     ylab = "Silhouette Width")
-lines(1:15, sil_width)
 
-dev.off()
+# sil_width <- c(NA)
+# for(i in 2:6){  
+#   pam_fit <- pam(gower_dist, diss = TRUE, k = i)  
+#   sil_width[i] <- pam_fit$silinfo$avg.width  
+# }
+# 
+# 
+# 
+# pdf("Figure_2_average_silhouette_by_cluster_number.pdf")
+# plot(1:6, sil_width,
+#      xlab = "Number of clusters",
+#      ylab = "Silhouette Width")
+# lines(1:6, sil_width)
+# 
+# dev.off()
 ```
 
 Looks like k = 3 would be reasonable
@@ -161,8 +206,6 @@ pam_results$the_summary
 
 ## Table 1: Means of continuous variables by cluster
 
-
-Interestingly, cluster 2 has lower cardiac index and higher pulmonary capillary wedge pressure, suggesting worse cardiac physiology.
 ```{r means_by_cluster}
 df %>%
   mutate(cluster = pam_fit$clustering) %>%
@@ -172,16 +215,22 @@ df %>%
 
 
 
-
-
 ## Table 2: Distribution of functional status by cluster
 
 Functional status is also dependent on cluster, with cluster 3 has the worse functional status (severe impairment)
 ```{r count_by_cluster}
 total_obs <- df %>% nrow()
 
-knitr::kable(df %>%
-  mutate(cluster = pam_fit$clustering) %>%
+
+df_data <- df %>% 
+  cbind(ids) %>%
+  select(PX_ID) %>%
+  left_join(to_cluster)
+
+df_data["cluster"] <- pam_fit$clustering
+
+
+knitr::kable(df_data %>%
   group_by(cluster) %>%
   count(functional_status) %>%
   mutate(total = sum(n),
@@ -189,31 +238,6 @@ knitr::kable(df %>%
   select(functional_status, cluster, pct) %>%
   pivot_wider(names_from = "functional_status", values_from = "pct"))
 ```
-
-# Dimension-reduction
-
-Perform dimension reduction with `Rtsne` and plot results
-```{r dim_reduction_with_t_SNE}
-tsne_obj <- Rtsne(gower_dist, is_distance = TRUE)
-
-tsne_data <- tsne_obj$Y %>%
-  data.frame() %>%
-  setNames(c("X", "Y")) %>%
-  mutate(cluster = factor(pam_fit$clustering))
-
-ggplot(aes(x = X, y = Y), data = tsne_data) +
-  geom_point(aes(color = cluster))
-```
-Looks like in the 2-dimensional embedding generated by `Rtsne` the observations are  clumped, likely from our many categorical variables. within each data clump however, each is usually the same cluster.
-
-```{r}
-df_data <- df %>%
-  mutate(cluster = factor(pam_fit$clustering))
-
-ggplot(aes(x = age, y = eGFR), data = df_data) +
-  geom_point(aes(color = cluster))
-```
-Picking two continuous variables, `age` and `eGFR` there doesn't seem to be any obvious relationship between the clusters and the 
 
 
 # Table 3:Listing Status and clusters 
@@ -227,19 +251,71 @@ knitr::kable(df_data %>%
   select(status, cluster, pct) %>%
   pivot_wider(names_from = "status", values_from = "pct"))
 ```
-Cluster 3 has a higher percentage of Status 1A candidates, however all Status levels are represented in each cluster.
+
+```{r }
+knitr::kable(df_data %>%
+  group_by(cluster) %>%
+  count(functional_status) %>%
+  mutate(total = sum(n),
+         pct = paste0(round(100*n/total), "%")) %>%
+  select(functional_status, cluster, pct) %>%
+  pivot_wider(names_from = "functional_status", values_from = "pct"))
+```
 
 
-# Next steps
 
-## Importance of each clinical variable 
+```{r}
+df_data %>%
+  ggplot(aes(x = functional_status, group = factor(cluster), fill = factor(cluster))) +
+  geom_bar() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
 
-In our choice of distance metric, we assign equal weight to each clinical variable. We also selected a small subset of the variables based on clinical intuition. Does this make sense? Some clinical variables are clearly more important than others.
+# Table 3:Listing Status and clusters 
+```{r }
+df_data %>%
+  ggplot(aes(x = status, fill = factor(cluster))) +
+  geom_bar() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
 
 
-## GMM (Gaussian Mixture Model)
+```{r }
+knitr::kable(df_data %>%
+  group_by(status) %>%
+  count(cluster) %>% 
+  mutate(total = sum(n),
+         pct = paste0(round(100*n/total), "%")) %>%
+  select(status, cluster, pct) %>%
+  pivot_wider(names_from = "status", values_from = "pct"))
+```
 
 
-## Aim 2: survival analysis
+```{r}
+df_data %>%
+  ggplot(aes(x = treatment, fill = factor(cluster))) +
+  geom_bar() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Aim 2: survival analysis
+
 
 Compare performance of clusters in predicting survival on waitlist with the "Status levels"
+
+## Survival on the waitlist by status
+```{r}
+
+status_survfit <- survfit(Surv(time, dead) ~ status, data = df_data)
+
+autoplot(status_survfit, censor = FALSE)
+```
+
+## Survival on the wailtist by cluster
+```{r}
+cluster_survfit <- survfit(Surv(time, dead) ~ cluster, data = df_data)
+
+autoplot(cluster_survfit, censor = FALSE) + lims(x = c(0, 1825))
+```
+
